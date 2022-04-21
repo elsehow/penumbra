@@ -31,3 +31,4 @@ serde_with = { version = "1.11", features = ["hex"] }
 structopt = "0.3"
 tracing = "0.1"
 tracing-subscriber = "0.2"
+tonic = "0.6.1"

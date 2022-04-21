@@ -1,79 +1,48 @@
+#[allow(clippy::clone_on_copy)]
 use anyhow::Result;
-use penumbra_proto::client::oblivious::CompactBlockRangeRequest;
+use penumbra_proto::client::oblivious::{
+    oblivious_query_client::ObliviousQueryClient, AssetListRequest, ChainParamsRequest,
+    CompactBlockRangeRequest,
+};
 use sqlx::sqlite::SqlitePool;
 use std::env;
+use tonic::transport::{Channel, Server};
 use tracing::instrument;
 
 use penumbra_wallet_next::Storage;
-#[allow(clippy::clone_on_copy)]
+
 use std::path::PathBuf;
 
 use directories::ProjectDirs;
 
 use structopt::StructOpt;
 
-// use command::*;
-// use state::ClientStateFile;
-// use sync::sync;
-#[derive(Debug, StructOpt)]
-#[structopt(
-    name = "pcli",
-    about = "The Penumbra command-line interface.",
-    version = env!("VERGEN_GIT_SEMVER"),
-)]
-pub struct Opt {
-    /// The address of the pd+tendermint node.
-    #[structopt(short, long, default_value = "testnet.penumbra.zone")]
-    pub node: String,
-    /// The port to use to speak to tendermint.
-    #[structopt(short, long, default_value = "26657")]
-    pub rpc_port: u16,
-    /// The port to use to speak to pd's light wallet server.
-    #[structopt(short, long, default_value = "26666")]
-    pub oblivious_query_port: u16,
-    /// The port to use to speak to pd's thin wallet server.
-    #[structopt(short, long, default_value = "26667")]
-    pub specific_query_port: u16,
-    /// The location of the wallet file [default: platform appdata directory]
-    #[structopt(short, long)]
-    pub wallet_location: Option<String>,
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
-    let opt = Opt::from_args();
 
-    let project_dir =
-        ProjectDirs::from("zone", "penumbra", "pcli").expect("can access penumbra project dir");
-    // Currently we use just the data directory. Create it if it is missing.
-    std::fs::create_dir_all(project_dir.data_dir()).expect("can create penumbra data directory");
-
-    // We store wallet data in `penumbra_wallet.dat` in the state directory, unless
-    // the user provides another location.
-    // TODO: make this not depend on project directory to support other custody services
-    let wallet_path = opt.wallet_location.as_ref().map_or_else(
-        || project_dir.data_dir().join("penumbra_wallet.json"),
-        PathBuf::from,
-    );
-
-    // Synchronize the wallet if the command requires it to be synchronized before it is run.
-    let mut state = ClientStateFile::load(wallet_path.clone())?;
-
-    // Chain params may not have been fetched yet, do so if necessary.
-    if state.chain_params().is_none() {
-        fetch::chain_params(&opt, &mut state).await?;
-    }
-    // From now on, we can .expect() on the chain params.
-
-    // Always sync pwalletd on startup.
-    sync(&opt, &mut state).await?;
-    fetch::assets(&opt, &mut state).await?;
+    let mut client =
+        ObliviousQueryClient::connect(format!("http://{}:{}", node, oblivious_query_port))
+            .await
+            .map_err(Into::into)?;
 
     let pool = SqlitePool::connect(&env::var("DATABASE_URL")?).await?;
     let storage = Storage::new(pool);
-
     storage.migrate().await?;
+
+    // TODO: select a custody service here to provide the wallet data source and update local sqlite storage as needed
+
+    // Fetch chain params if necessary so we can .expect() on them.
+    if storage.chain_params().await.is_none() {
+        chain_params(&client, &mut storage).await?;
+    }
+
+    // Always sync pwalletd on startup.
+    sync(&client, &mut storage).await?;
+    // Retrieve asset list
+    assets(&client, &mut storage).await?;
+
+    // TODO: this is just a sqlite usage stub
 
     let row = storage.insert_table().await?;
     let x = storage.read_table().await?;
@@ -84,34 +53,37 @@ async fn main() -> Result<()> {
     );
 
     // TODO: start gRPC service and respond to command requests
-    let wallet_server = tokio::spawn(
-        Server::builder()
-            .trace_fn(|req| match remote_addr(req) {
-                Some(remote_addr) => tracing::error_span!("wallet_query", ?remote_addr),
-                None => tracing::error_span!("wallet_query"),
-            })
-            .add_service(WalletServer::new(storage.clone()))
-            .serve(
-                format!("{}:{}", host, wallet_query_port)
-                    .parse()
-                    .expect("this is a valid address"),
-            ),
-    );
+    // let wallet_server = tokio::spawn(
+    //     Server::builder()
+    //         .trace_fn(|req| match remote_addr(req) {
+    //             Some(remote_addr) => tracing::error_span!("wallet_query", ?remote_addr),
+    //             None => tracing::error_span!("wallet_query"),
+    //         })
+    //         .add_service(WalletServer::new(storage.clone()))
+    //         .serve(
+    //             format!("{}:{}", host, wallet_query_port)
+    //                 .parse()
+    //                 .expect("this is a valid address"),
+    //         ),
+    // );
     Ok(())
 }
 
-#[instrument(skip(opt, state), fields(start_height = state.last_block_height()))]
-pub async fn sync(opt: &Opt, state: &mut ClientStateFile) -> Result<()> {
+pub async fn sync(client: &ObliviousQueryClient<Channel>, storage: &mut Storage) -> Result<()> {
     tracing::info!("starting client sync");
-    let mut client = opt.oblivious_client().await?;
 
-    let start_height = state.last_block_height().map(|h| h + 1).unwrap_or(0);
+    let start_height = storage
+        .last_block_height()
+        .await
+        .map(|h| h + 1)
+        .unwrap_or(0);
     let mut stream = client
         .compact_block_range(tonic::Request::new(CompactBlockRangeRequest {
             start_height,
             end_height: 0,
-            chain_id: state
+            chain_id: storage
                 .chain_id()
+                .await
                 .ok_or_else(|| anyhow::anyhow!("missing chain_id"))?,
         }))
         .await?
@@ -119,17 +91,55 @@ pub async fn sync(opt: &Opt, state: &mut ClientStateFile) -> Result<()> {
 
     let mut count = 0;
     while let Some(block) = stream.message().await? {
-        state.scan_block(block.try_into()?)?;
+        storage.scan_block(block.try_into()?)?;
         // very basic form of intermediate checkpointing
         count += 1;
         if count % 1000 == 1 {
-            state.commit()?;
-            tracing::info!(height = ?state.last_block_height().unwrap(), "syncing...");
+            storage.commit()?;
+            tracing::info!(height = ?storage.last_block_height().await.unwrap(), "syncing...");
         }
     }
 
-    state.prune_timeouts();
-    state.commit()?;
-    tracing::info!(end_height = ?state.last_block_height().unwrap(), "finished sync");
+    storage.prune_timeouts();
+    storage.commit()?;
+    tracing::info!(end_height = ?storage.last_block_height().await.unwrap(), "finished sync");
+    Ok(())
+}
+
+pub async fn assets(client: &ObliviousQueryClient<Channel>, storage: &mut Storage) -> Result<()> {
+    // Update asset registry.
+    let request = tonic::Request::new(AssetListRequest {
+        chain_id: storage.chain_id().await.unwrap_or_default(),
+    });
+    let assets: KnownAssets = client.asset_list(request).await?.into_inner().try_into()?;
+    for asset in assets.0 {
+        storage
+            .asset_cache_mut()
+            .extend(std::iter::once(asset.denom));
+    }
+
+    storage.commit()?;
+    tracing::info!("updated asset registry");
+    Ok(())
+}
+
+/// Fetches the global chain parameters and stores them on `storage`.
+
+pub async fn chain_params(
+    client: &ObliviousQueryClient<Channel>,
+    storage: &mut Storage,
+) -> Result<()> {
+    let params = client
+        .chain_params(tonic::Request::new(ChainParamsRequest {
+            chain_id: storage.chain_id().await.unwrap_or_default(),
+        }))
+        .await?
+        .into_inner()
+        .into();
+
+    tracing::info!(?params, "saving chain params");
+
+    *storage.chain_params_mut() = Some(params);
+    storage.commit()?;
     Ok(())
 }
