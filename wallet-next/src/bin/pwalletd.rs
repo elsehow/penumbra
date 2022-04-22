@@ -1,5 +1,5 @@
 #[allow(clippy::clone_on_copy)]
-use anyhow::Result;
+use anyhow::{Context, Result};
 use penumbra_proto::client::oblivious::{
     oblivious_query_client::ObliviousQueryClient, AssetListRequest, ChainParamsRequest,
     CompactBlockRangeRequest,
@@ -17,55 +17,114 @@ use directories::ProjectDirs;
 
 use structopt::StructOpt;
 
+#[derive(Debug, StructOpt)]
+#[structopt(
+    name = "pwalletd",
+    about = "The Penumbra wallet daemon.",
+    version = env!("VERGEN_GIT_SEMVER"),
+)]
+struct Opt {
+    /// Command to run.
+    #[structopt(subcommand)]
+    cmd: Command,
+}
+
+#[derive(Debug, StructOpt)]
+enum Command {
+    /// Start running the wallet daemon.
+    Start {
+        /// The path used to store the SQLite state database.
+        #[structopt(short, long)]
+        sqlite_path: PathBuf,
+        /// Bind the services to this host.
+        #[structopt(short, long, default_value = "127.0.0.1")]
+        host: String,
+        /// Bind the wallet gRPC server to this port.
+        #[structopt(short, long, default_value = "26668")]
+        grpc_port: u16,
+        /// The address of the pd+tendermint node.
+        #[structopt(short, long, default_value = "testnet.penumbra.zone")]
+        node: String,
+        /// The port to use to speak to pd's light wallet server.
+        #[structopt(short, long, default_value = "26666")]
+        oblivious_query_port: u16,
+        /// The port to use to speak to pd's thin wallet server.
+        #[structopt(short, long, default_value = "26667")]
+        specific_query_port: u16,
+    },
+}
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
+    let opt = Opt::from_args();
 
-    let mut client =
-        ObliviousQueryClient::connect(format!("http://{}:{}", node, oblivious_query_port))
-            .await
-            .map_err(Into::into)?;
+    match opt.cmd {
+        Command::Start {
+            sqlite_path,
+            host,
+            grpc_port,
+            node,
+            oblivious_query_port,
+            specific_query_port,
+        } => {
+            tracing::info!(
+                ?sqlite_path,
+                ?host,
+                ?grpc_port,
+                ?node,
+                ?oblivious_query_port,
+                ?specific_query_port,
+                "starting pwalletd"
+            );
 
-    let pool = SqlitePool::connect(&env::var("DATABASE_URL")?).await?;
-    let storage = Storage::new(pool);
-    storage.migrate().await?;
+            let mut client =
+                ObliviousQueryClient::connect(format!("http://{}:{}", node, oblivious_query_port))
+                    .await
+                    .context("Unable to connect to oblivious query server")?;
 
-    // TODO: select a custody service here to provide the wallet data source and update local sqlite storage as needed
+            let pool = SqlitePool::connect(&env::var("DATABASE_URL")?).await?;
+            let storage = Storage::new(pool);
+            storage.migrate().await?;
 
-    // Fetch chain params if necessary so we can .expect() on them.
-    if storage.chain_params().await.is_none() {
-        chain_params(&client, &mut storage).await?;
+            // TODO: select a custody service here to provide the wallet data source and update local sqlite storage as needed
+
+            // Fetch chain params if necessary so we can .expect() on them.
+            if storage.chain_params().await.is_none() {
+                chain_params(&client, &mut storage).await?;
+            }
+
+            // Always sync pwalletd on startup.
+            sync(&client, &mut storage).await?;
+            // Retrieve asset list
+            assets(&client, &mut storage).await?;
+
+            // TODO: this is just a sqlite usage stub
+
+            let row = storage.insert_table().await?;
+            let x = storage.read_table().await?;
+
+            println!(
+                "Hello, pwalletd! I got stuff from sqlite: row {} value {}",
+                row, x
+            );
+
+            // TODO: start gRPC service and respond to command requests
+            // let wallet_server = tokio::spawn(
+            //     Server::builder()
+            //         .trace_fn(|req| match remote_addr(req) {
+            //             Some(remote_addr) => tracing::error_span!("wallet_query", ?remote_addr),
+            //             None => tracing::error_span!("wallet_query"),
+            //         })
+            //         .add_service(WalletServer::new(storage.clone()))
+            //         .serve(
+            //             format!("{}:{}", host, wallet_query_port)
+            //                 .parse()
+            //                 .expect("this is a valid address"),
+            //         ),
+            // );
+        }
     }
 
-    // Always sync pwalletd on startup.
-    sync(&client, &mut storage).await?;
-    // Retrieve asset list
-    assets(&client, &mut storage).await?;
-
-    // TODO: this is just a sqlite usage stub
-
-    let row = storage.insert_table().await?;
-    let x = storage.read_table().await?;
-
-    println!(
-        "Hello, pwalletd! I got stuff from sqlite: row {} value {}",
-        row, x
-    );
-
-    // TODO: start gRPC service and respond to command requests
-    // let wallet_server = tokio::spawn(
-    //     Server::builder()
-    //         .trace_fn(|req| match remote_addr(req) {
-    //             Some(remote_addr) => tracing::error_span!("wallet_query", ?remote_addr),
-    //             None => tracing::error_span!("wallet_query"),
-    //         })
-    //         .add_service(WalletServer::new(storage.clone()))
-    //         .serve(
-    //             format!("{}:{}", host, wallet_query_port)
-    //                 .parse()
-    //                 .expect("this is a valid address"),
-    //         ),
-    // );
     Ok(())
 }
 
