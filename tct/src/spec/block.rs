@@ -37,12 +37,14 @@ impl Builder {
             return Err(InsertError::BlockFull);
         }
 
-        // Insert the item into the block
-        self.block.push_back(insert);
         // Calculate the item's position
         let position = self.position();
+
+        // Insert the item into the block
+        self.block.push_back(insert);
+
         // Return the position
-        Ok(position.into())
+        Ok(position)
     }
 
     /// Forget the witness for a given [`Commitment`], returning `true` if it was previously witnessed.
