@@ -16,6 +16,7 @@ members = [
   "pcli-next",
   "tct",
   "tct-property-test",
+  "tct-spec",
   "ibc",
 ]
 
