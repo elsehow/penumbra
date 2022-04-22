@@ -69,7 +69,7 @@ impl Builder {
 
     /// Calculate the position of the next insertion into this epoch.
     pub fn position(&self) -> Position {
-        let position = self.block.len() as u16 - 1;
+        let position = self.block.len() as u16;
         position.into()
     }
 
