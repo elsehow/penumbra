@@ -142,7 +142,7 @@ pub(super) fn epoch(epoch: Insert<List<Insert<List<Insert<Commitment>>>>>) -> im
 
 /// Build an eternity from an iterator of epochs.
 pub(super) fn eternity(
-    eternity: impl IntoIterator<Item = Insert<List<Insert<List<Insert<Commitment>>>>>>,
+    eternity: List<Insert<List<Insert<List<Insert<Commitment>>>>>>,
 ) -> impl Builder {
     tier(
         16,
