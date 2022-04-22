@@ -31,15 +31,12 @@ pub enum InsertError {
 pub enum InsertBlockError {
     /// The [`Eternity`] was full.
     #[error("eternity is full")]
-    #[non_exhaustive]
     Full(Block),
     /// The most recent [`Epoch`] of the [`Eternity`] was full.
     #[error("most recent epoch is full")]
-    #[non_exhaustive]
     EpochFull(Block),
     /// The most recent [`Epoch`] of the [`Eternity`] was forgotten.
     #[error("most recent epoch was forgotten")]
-    #[non_exhaustive]
     EpochForgotten(Block),
 }
 
@@ -58,22 +55,18 @@ impl From<InsertBlockError> for Block {
 pub enum InsertBlockRootError {
     /// The [`Eternity`] was full.
     #[error("eternity is full")]
-    #[non_exhaustive]
     Full,
     /// The most recent [`Epoch`] of the [`Eternity`] was full.
     #[error("most recent epoch is full")]
-    #[non_exhaustive]
     EpochFull,
     /// The most recent [`Epoch`] of the [`Eternity`] was forgotten.
     #[error("most recent epoch was forgotten")]
-    #[non_exhaustive]
     EpochForgotten,
 }
 
 /// The [`Eternity`] was full when trying to insert an [`Epoch`].
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("eternity is full")]
-#[non_exhaustive]
 pub struct InsertEpochError(pub Epoch);
 
 impl From<InsertEpochError> for Epoch {
@@ -85,7 +78,6 @@ impl From<InsertEpochError> for Epoch {
 /// The [`Eternity`] was full when trying to insert an [`Epoch`] root.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("eternity is full")]
-#[non_exhaustive]
 pub struct InsertEpochRootError;
 
 #[cfg(test)]

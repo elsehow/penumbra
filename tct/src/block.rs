@@ -136,7 +136,6 @@ impl Height for Block {
 /// When inserting into a block, this error is returned when it is full.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 #[error("block is full")]
-#[non_exhaustive]
 pub struct InsertError;
 
 impl Block {
