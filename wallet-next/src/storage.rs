@@ -53,8 +53,19 @@ impl Storage {
     }
     //TODO: these should correspond to sqlite tables representing what was previously held in ClientState
     /// The last block height we've scanned to, if any.
-    pub async fn last_block_height(&self) -> Option<u64> {
-        todo!()
+    pub async fn last_block_height(&self) -> anyhow::Result<Option<u64>> {
+        let result = sqlx::query!(
+            r#"
+            SELECT last_block_height
+            FROM last_block_height
+            ORDER BY last_block_height DESC
+            LIMIT 1
+        "#
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(result[0].value.clone())
     }
     /// Note commitment tree.
     pub async fn note_commitment_tree(&self) -> NoteCommitmentTree {
